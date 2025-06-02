@@ -10,6 +10,6 @@ class GeminiLLM:
             contents=[prompt]
         )
         if response.text is None:
-            raise RuntimeError("Gemini returned no text")
+            raise RuntimeError("Gemini returned no text...")
         return response.text
 
