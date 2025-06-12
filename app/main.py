@@ -12,6 +12,7 @@ from google.auth.transport.requests import Request as GoogleRequest
 from typing import Optional
 import time
 import uuid
+from app.supabase_client import supabase
 
 app = FastAPI()
 llm = GeminiLLM()
@@ -154,9 +155,57 @@ async def logout():
     )
     return response
 
-@app.post("/ask")
-async def ask_question(query: Query):
+@app.get("/chat/history")
+async def get_chat_history(session_id: str, token: Optional[str] = Cookie(None)):
     try:
+        # Verify user is authenticated
+        if not token:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        
+        # Get user ID from token
+        idinfo = id_token.verify_oauth2_token(
+            token,
+            GoogleRequest(),
+            os.getenv("GOOGLE_CLIENT_ID"),
+            clock_skew_in_seconds=60
+        )
+        user_id = idinfo.get("sub")
+
+        # Fetch chat history for this user and session
+        result = supabase.table("chat_messages") \
+            .select("*") \
+            .eq("session_id", session_id) \
+            .eq("user_id", user_id) \
+            .order("created_at") \
+            .execute()
+
+        return {"messages": result.data}
+
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/ask")
+async def ask_question(query: Query, token: Optional[str] = Cookie(None)):
+    try:
+        user_id = None
+        if token:
+            try:
+                idinfo = id_token.verify_oauth2_token(
+                    token,
+                    GoogleRequest(),
+                    os.getenv("GOOGLE_CLIENT_ID"),
+                    clock_skew_in_seconds=60
+                )
+                user_id = idinfo.get("sub")
+            except ValueError:
+                user_id = "anonymous"
+        else:
+            user_id = "anonymous"
+        session_id = str(uuid.uuid4())
+        
         chunks = get_relevant_chunks(query.question)
         if not chunks:
             return {"answer": "No relevant information found."}
@@ -170,6 +219,23 @@ Question:
 {query.question}
 """
         answer = llm.generate(prompt)
-        return {"answer": answer}
+
+        user_message = {
+            "user_id": user_id,
+            "session_id": session_id,
+            "message": query.question,
+            "is_user": True,
+        }
+        supabase.table("chat_messages").insert(user_message).execute()
+
+        ai_message = {
+            "session_id": session_id,
+            "user_id": user_id,
+            "message": answer,
+            "is_user": False,
+        }
+        supabase.table("chat_messages").insert(ai_message).execute()
+
+        return {"answer": answer, "session_id": session_id}
     except Exception as e:
         return JSONResponse(status_code=500, content={"answer": f"Error processing request: {str(e)}"})
