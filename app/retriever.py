@@ -10,7 +10,3 @@ def get_relevant_chunks(query: str):
     documents = [doc for doc, score in results]  
     contents = get_page_contents(documents)      
     return contents
-    
-
-# if __name__ == "__get_relevant_chunks__":
-#     get_relevant_chunks("Who is Harry Potter?")

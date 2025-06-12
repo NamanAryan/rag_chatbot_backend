@@ -1,7 +1,13 @@
 from google import genai
 import os
+from dotenv import load_dotenv
+load_dotenv()
 
-client = genai.Client(api_key="AIzaSyB7sETj_9G7k3y2UMYSW9oIpaAMYfTvn7I")  
+google_api = os.getenv("API_KEY_GEMINI")
+if google_api is None:
+    raise EnvironmentError("API_KEY_GEMINI not set in environment variables.")
+
+client = genai.Client(api_key = google_api)  
 
 class GeminiLLM:
     def generate(self, prompt: str) -> str:
