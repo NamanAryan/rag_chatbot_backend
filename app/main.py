@@ -28,6 +28,7 @@ app.add_middleware(
 
 class Query(BaseModel):
     question: str
+    session_id: Optional[str] = None
 
 @app.get("/")
 async def root():
@@ -155,8 +156,8 @@ async def logout():
     )
     return response
 
-@app.get("/chat/history")
-async def get_chat_history(session_id: str, token: Optional[str] = Cookie(None)):
+@app.delete("/chat/delete/{session_id}")
+async def delete_chat_session(session_id: str, token: Optional[str] = Cookie(None)):
     try:
         # Verify user is authenticated
         if not token:
@@ -171,7 +172,48 @@ async def get_chat_history(session_id: str, token: Optional[str] = Cookie(None))
         )
         user_id = idinfo.get("sub")
 
-        # Fetch chat history for this user and session
+        # Delete all messages for this session and user
+        result = supabase.table("chat_messages") \
+            .delete() \
+            .eq("session_id", session_id) \
+            .eq("user_id", user_id) \
+            .execute()
+
+        # Check if any rows were deleted
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+
+        return {"message": "Chat session deleted successfully", "deleted_count": len(result.data)}
+
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        print(f"Error deleting chat session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/chat/history")
+async def get_chat_history(session_id: str, token: Optional[str] = Cookie(None)):
+    try:
+        print(f"Received request for session_id: {session_id}")  # ✅ Add debug
+        
+        # Verify user is authenticated
+        if not token:
+            print("No token provided")  # ✅ Add debug
+            raise HTTPException(status_code=401, detail="Authentication required")
+
+        print(f"Token: {token[:20]}...")  # ✅ Add debug (partial token)
+        
+        idinfo = id_token.verify_oauth2_token(
+            token,
+            GoogleRequest(),
+            os.getenv("GOOGLE_CLIENT_ID"),
+            clock_skew_in_seconds=60
+        )
+        user_id = idinfo.get("sub")
+        print(f"User ID: {user_id}")  # ✅ Add debug
+
+        print("Querying Supabase...")  # ✅ Add debug
         result = supabase.table("chat_messages") \
             .select("*") \
             .eq("session_id", session_id) \
@@ -179,7 +221,48 @@ async def get_chat_history(session_id: str, token: Optional[str] = Cookie(None))
             .order("created_at") \
             .execute()
 
+        print(f"Supabase result: {len(result.data)} messages")  # ✅ Add debug
         return {"messages": result.data}
+
+    except ValueError as e:
+        print(f"ValueError: {e}")  # ✅ Add debug
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        print(f"Exception: {e}")  # ✅ Add debug
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/chat/sessions")
+async def get_user_sessions(token: Optional[str] = Cookie(None)):
+    try:
+        if not token:
+            raise HTTPException(status_code=401, detail="Authentication required")
+  
+        idinfo = id_token.verify_oauth2_token(
+            token,
+            GoogleRequest(),
+            os.getenv("GOOGLE_CLIENT_ID"),
+            clock_skew_in_seconds=60
+        )
+        user_id = idinfo.get("sub")
+
+        result = supabase.table("chat_messages") \
+            .select("session_id, message, created_at") \
+            .eq("user_id", user_id) \
+            .eq("is_user", True) \
+            .order("created_at", desc=True) \
+            .execute()
+
+        sessions = {}
+        for msg in result.data:
+            session_id = msg["session_id"]
+            if session_id not in sessions:
+                sessions[session_id] = {
+                    "session_id": session_id,
+                    "title": msg["message"][:50] + "..." if len(msg["message"]) > 50 else msg["message"],
+                    "timestamp": msg["created_at"]
+                }
+        return {"sessions": list(sessions.values())}
 
     except ValueError:
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -204,7 +287,8 @@ async def ask_question(query: Query, token: Optional[str] = Cookie(None)):
                 user_id = "anonymous"
         else:
             user_id = "anonymous"
-        session_id = str(uuid.uuid4())
+         
+        session_id = query.session_id or str(uuid.uuid4())
         
         chunks = get_relevant_chunks(query.question)
         if not chunks:
