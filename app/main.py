@@ -172,14 +172,12 @@ async def delete_chat_session(session_id: str, token: Optional[str] = Cookie(Non
         )
         user_id = idinfo.get("sub")
 
-        # Delete all messages for this session and user
         result = supabase.table("chat_messages") \
             .delete() \
             .eq("session_id", session_id) \
             .eq("user_id", user_id) \
             .execute()
 
-        # Check if any rows were deleted
         if not result.data:
             raise HTTPException(status_code=404, detail="Chat session not found")
 
@@ -294,7 +292,10 @@ async def ask_question(query: Query, token: Optional[str] = Cookie(None)):
         if not chunks:
             return {"answer": "No relevant information found."}
         context = "\n\n".join(chunks)
-        prompt = f"""Use the context below to answer the question.
+        prompt = f"""Use the context below to answer the question. Do not include ** in your answer. 
+                    Do not use any other context than the one provided below. Do not make up any information.
+                    Do not include any disclaimers or apologies in your answer. Do not include any information about the source of the context.
+                    If user asked about the source of the context or asks outside the context, say that you cannot provide that information. 
     
 Context:
 {context}
