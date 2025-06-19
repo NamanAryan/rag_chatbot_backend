@@ -29,6 +29,8 @@ app.add_middleware(
 class Query(BaseModel):
     question: str
     session_id: Optional[str] = None
+    personality: Optional[str] = None  
+    system_prompt: Optional[str] = None
 
 @app.get("/")
 async def root():
@@ -157,17 +159,15 @@ async def logout():
     return response
 
 @app.delete("/chat/delete/{session_id}")
-async def delete_chat_session(session_id: str, token: Optional[str] = Cookie(None)):
+async def delete_chat_session(session_id: str, personality: str = "sage", token: Optional[str] = Cookie(None)):
     try:
-        # Verify user is authenticated
         if not token:
             raise HTTPException(status_code=401, detail="Authentication required")
         
-        # Get user ID from token
         idinfo = id_token.verify_oauth2_token(
             token,
             GoogleRequest(),
-            os.getenv("GOOGLE_CLIENT_ID"),
+            os.getenv("GOOGLE_CLIENT_ID"),  
             clock_skew_in_seconds=60
         )
         user_id = idinfo.get("sub")
@@ -176,6 +176,7 @@ async def delete_chat_session(session_id: str, token: Optional[str] = Cookie(Non
             .delete() \
             .eq("session_id", session_id) \
             .eq("user_id", user_id) \
+            .eq("personality", personality) \
             .execute()
 
         if not result.data:
@@ -186,21 +187,20 @@ async def delete_chat_session(session_id: str, token: Optional[str] = Cookie(Non
     except ValueError:
         raise HTTPException(status_code=401, detail="Invalid token")
     except Exception as e:
-        print(f"Error deleting chat session: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.get("/chat/history")
 async def get_chat_history(session_id: str, token: Optional[str] = Cookie(None)):
     try:
-        print(f"Received request for session_id: {session_id}")  # ✅ Add debug
-        
-        # Verify user is authenticated
+        if not session_id:
+            raise HTTPException(status_code=400, detail="Session ID is required")
+
         if not token:
-            print("No token provided")  # ✅ Add debug
+
             raise HTTPException(status_code=401, detail="Authentication required")
 
-        print(f"Token: {token[:20]}...")  # ✅ Add debug (partial token)
         
         idinfo = id_token.verify_oauth2_token(
             token,
@@ -209,33 +209,32 @@ async def get_chat_history(session_id: str, token: Optional[str] = Cookie(None))
             clock_skew_in_seconds=60
         )
         user_id = idinfo.get("sub")
-        print(f"User ID: {user_id}")  # ✅ Add debug
-
-        print("Querying Supabase...")  # ✅ Add debug
+        
         result = supabase.table("chat_messages") \
             .select("*") \
             .eq("session_id", session_id) \
             .eq("user_id", user_id) \
+            .eq("personality", Query.personality) \
             .order("created_at") \
             .execute()
 
-        print(f"Supabase result: {len(result.data)} messages")  # ✅ Add debug
+        
         return {"messages": result.data}
 
     except ValueError as e:
-        print(f"ValueError: {e}")  # ✅ Add debug
+        
         raise HTTPException(status_code=401, detail="Invalid token")
     except Exception as e:
-        print(f"Exception: {e}")  # ✅ Add debug
+        
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/chat/sessions")
-async def get_user_sessions(token: Optional[str] = Cookie(None)):
+async def get_user_sessions(personality: str = "sage", token: Optional[str] = Cookie(None)):
     try:
         if not token:
             raise HTTPException(status_code=401, detail="Authentication required")
-  
+        
         idinfo = id_token.verify_oauth2_token(
             token,
             GoogleRequest(),
@@ -248,6 +247,7 @@ async def get_user_sessions(token: Optional[str] = Cookie(None)):
             .select("session_id, message, created_at") \
             .eq("user_id", user_id) \
             .eq("is_user", True) \
+            .eq("personality", personality) \
             .order("created_at", desc=True) \
             .execute()
 
@@ -258,14 +258,15 @@ async def get_user_sessions(token: Optional[str] = Cookie(None)):
                 sessions[session_id] = {
                     "session_id": session_id,
                     "title": msg["message"][:50] + "..." if len(msg["message"]) > 50 else msg["message"],
-                    "timestamp": msg["created_at"]
+                    "timestamp": msg["created_at"],
+                    "personality": personality
                 }
+
         return {"sessions": list(sessions.values())}
 
     except ValueError:
         raise HTTPException(status_code=401, detail="Invalid token")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.post("/ask")
@@ -287,15 +288,17 @@ async def ask_question(query: Query, token: Optional[str] = Cookie(None)):
             user_id = "anonymous"
          
         session_id = query.session_id or str(uuid.uuid4())
+        personality = query.personality
         
         chunks = get_relevant_chunks(query.question)
         if not chunks:
             return {"answer": "No relevant information found."}
         context = "\n\n".join(chunks)
         prompt = f"""Use the context below to answer the question. Do not include ** in your answer. 
-                    Do not use any other context than the one provided below. Do not make up any information.
-                    Do not include any disclaimers or apologies in your answer. Do not include any information about the source of the context.
+                    Do not include any disclaimers or apologies in your answer. 
                     If user asked about the source of the context or asks outside the context, say that you cannot provide that information. 
+                    If the user is asking about harry potter related information, you can answer it using internal knowledge if context is not sufficient.
+                    Do not talk about the context or how you are using it in your answer. Dont say "texts from the context" or "the context says" or similar phrases.   
     
 Context:
 {context}
@@ -310,6 +313,7 @@ Question:
             "session_id": session_id,
             "message": query.question,
             "is_user": True,
+            "personality":  query.personality,
         }
         supabase.table("chat_messages").insert(user_message).execute()
 
@@ -318,6 +322,7 @@ Question:
             "user_id": user_id,
             "message": answer,
             "is_user": False,
+            "personality": query.personality
         }
         supabase.table("chat_messages").insert(ai_message).execute()
 
