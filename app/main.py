@@ -1,10 +1,12 @@
+import shutil
 from fastapi import FastAPI, Request, Depends, HTTPException, Cookie
+from fastapi import Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
 import os
 from app.gemini import GeminiLLM
-from app.retriever import get_relevant_chunks
+from app.retriever import create_file_vectorstore, get_relevant_chunks
 from fastapi.responses import JSONResponse, RedirectResponse
 from google.oauth2 import id_token
 from dotenv import load_dotenv
@@ -13,6 +15,16 @@ from typing import Optional
 import time
 import uuid
 from app.supabase_client import supabase
+from app.retriever import get_relevant_chunks, create_file_vectorstore
+from fastapi import File, UploadFile, Form
+import PyPDF2
+import docx
+import tempfile
+import os
+from typing import List
+from fastapi import Path as FastAPIPath
+from app.config import PERSONALITY_PROMPTS
+from pathlib import Path
 
 app = FastAPI()
 llm = GeminiLLM()
@@ -26,15 +38,96 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class Query(BaseModel):
+class QueryModel(BaseModel):
     question: str
     session_id: Optional[str] = None
     personality: Optional[str] = None  
     system_prompt: Optional[str] = None
+    has_file: Optional[bool] = False
 
 @app.get("/")
 async def root():
     return {"message": "Welcome to the Gemini LLM API!"}
+
+@app.post("/upload-file")
+async def upload_file(
+    file: UploadFile = File(...),
+    session_id: str = Form(...),
+    personality: str = Form(default="sage"),
+    token: Optional[str] = Cookie(None)
+):
+    try:
+        print(f"📁 Received file: {file.filename}, size: {file.size}")
+        print(f"📍 Session ID: {session_id}")
+        print(f"🎭 Personality: {personality}") 
+
+        if not token:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        
+        idinfo = id_token.verify_oauth2_token(
+            token,
+            GoogleRequest(),
+            os.getenv("GOOGLE_CLIENT_ID"),
+            clock_skew_in_seconds=60
+        )
+        user_id = idinfo.get("sub")
+        print(f"👤 User ID: {user_id}")
+
+        # Validate session_id
+        if not session_id or session_id == 'null':
+            raise HTTPException(status_code=400, detail="Invalid session ID")
+
+        # Extract text from file
+        file_content = await extract_text_from_file(file)
+        print(f"📄 Extracted text length: {len(file_content)}")
+        
+        if not file_content.strip():
+            raise HTTPException(status_code=400, detail="No text content found in file")
+
+        app_data = Path.home() / "AppData" / "Local" / "RAG_Chatbot" / "chroma_db_uploads"
+        app_data.mkdir(parents=True, exist_ok=True)
+        
+        persist_directory = app_data / f"user_{user_id}_session_{session_id}"
+        
+        # Remove existing directory safely
+        if persist_directory.exists():
+            shutil.rmtree(persist_directory)
+            print(f"🗑️ Cleared existing directory: {persist_directory}")
+
+        # Ensure directory exists
+        if persist_directory.exists():
+            try:
+                shutil.rmtree(persist_directory)
+                print(f"🗑️ Cleared existing directory: {persist_directory}")
+            except PermissionError:
+                # If can't delete, create with timestamp
+                import datetime
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                persist_directory = app_data / f"user_{user_id}_session_{session_id}_{timestamp}"
+
+        persist_directory.mkdir(parents=True, exist_ok=True)
+        # Split text into chunks
+        chunks = split_text_into_chunks(file_content)
+        print(f"📊 Created {len(chunks)} chunks")
+        
+        # Create vector store
+        vectorstore = create_file_vectorstore(chunks, user_id, session_id)
+        print(f"✅ Vector store created successfully")
+
+        return {
+            "message": "File uploaded successfully",
+            "chunks_created": len(chunks),
+            "filename": file.filename,
+            "session_id": session_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Upload error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 @app.get("/auth/google/url")
 async def google_auth_url():
@@ -86,8 +179,6 @@ def auth_callback(request: Request, code: str, state: Optional[str] = None):
         if not id_token_str:
             print("No id_token in response:", token_json)
             return RedirectResponse(url="http://localhost:5173/login?error=no_id_token")
-
-        # Step 2: Verify token with retry logic
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -159,7 +250,11 @@ async def logout():
     return response
 
 @app.delete("/chat/delete/{session_id}")
-async def delete_chat_session(session_id: str, personality: str = "sage", token: Optional[str] = Cookie(None)):
+async def delete_chat_session(
+    session_id: str, 
+    personality: str = Query(...),
+    token: Optional[str] = Cookie(None)
+):
     try:
         if not token:
             raise HTTPException(status_code=401, detail="Authentication required")
@@ -167,7 +262,7 @@ async def delete_chat_session(session_id: str, personality: str = "sage", token:
         idinfo = id_token.verify_oauth2_token(
             token,
             GoogleRequest(),
-            os.getenv("GOOGLE_CLIENT_ID"),  
+            os.getenv("GOOGLE_CLIENT_ID"),
             clock_skew_in_seconds=60
         )
         user_id = idinfo.get("sub")
@@ -192,7 +287,11 @@ async def delete_chat_session(session_id: str, personality: str = "sage", token:
 
 
 @app.get("/chat/history")
-async def get_chat_history(session_id: str, token: Optional[str] = Cookie(None)):
+async def get_chat_history(
+    session_id: str, 
+    personality: str = Query(...),
+    token: Optional[str] = Cookie(None)
+):
     try:
         if not session_id:
             raise HTTPException(status_code=400, detail="Session ID is required")
@@ -214,7 +313,7 @@ async def get_chat_history(session_id: str, token: Optional[str] = Cookie(None))
             .select("*") \
             .eq("session_id", session_id) \
             .eq("user_id", user_id) \
-            .eq("personality", Query.personality) \
+            .eq("personality", personality) \
             .order("created_at") \
             .execute()
 
@@ -230,7 +329,10 @@ async def get_chat_history(session_id: str, token: Optional[str] = Cookie(None))
 
 
 @app.get("/chat/sessions")
-async def get_user_sessions(personality: str = "sage", token: Optional[str] = Cookie(None)):
+async def get_user_sessions(
+    personality: str = Query(...),
+    token: Optional[str] = Cookie(None)
+):
     try:
         if not token:
             raise HTTPException(status_code=401, detail="Authentication required")
@@ -267,10 +369,107 @@ async def get_user_sessions(personality: str = "sage", token: Optional[str] = Co
     except ValueError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
+async def extract_text_from_file(file: UploadFile) -> str:
+    content = await file.read()
+    
+    if file.filename and file.filename.endswith('.pdf'):
+        return extract_pdf_text(content)
+    elif file.filename and file.filename.endswith('.docx'):
+        return extract_docx_text(content)
+    elif file.filename and file.filename.endswith('.txt'):
+        return content.decode('utf-8')
+    else:
+        raise ValueError("Unsupported file type or filename is missing")
 
+def extract_pdf_text(content: bytes) -> str:
+    with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+        tmp_file.write(content)
+        tmp_file.flush()
+        tmp_file_path = tmp_file.name  
+    try:
+        text = ""
+        with open(tmp_file_path, 'rb') as file:
+            pdf_reader = PyPDF2.PdfReader(file)
+            for page in pdf_reader.pages:
+                text += page.extract_text()
+        return text
+    finally:
+        try:
+            os.unlink(tmp_file_path)
+        except PermissionError:
+            import time
+            time.sleep(0.1)
+            try:
+                os.unlink(tmp_file_path)
+            except:
+                print(f"Warning: Could not delete temporary file {tmp_file_path}")
+
+def extract_docx_text(content: bytes) -> str:
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp_file:
+        tmp_file.write(content)
+        tmp_file.flush()
+        tmp_file_path = tmp_file.name  
+
+    try:
+        doc = docx.Document(tmp_file_path)
+        text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+        return text
+    finally:
+        try:
+            os.unlink(tmp_file_path)
+        except PermissionError:
+            import time
+            time.sleep(0.1)
+            try:
+                os.unlink(tmp_file_path)
+            except:
+                print(f"Warning: Could not delete temporary file {tmp_file_path}")
+
+
+def split_text_into_chunks(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
+    chunks = []
+    start = 0
+    
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end]
+        chunks.append(chunk)
+        start = end - overlap
+        
+        if start >= len(text):
+            break
+    
+    return chunks
+
+@app.delete("/delete-file/{session_id}")
+async def delete_uploaded_file(session_id: str, token: Optional[str] = Cookie(None)):
+    try:
+        if not token:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        
+        idinfo = id_token.verify_oauth2_token(
+            token,
+            GoogleRequest(),
+            os.getenv("GOOGLE_CLIENT_ID"),
+            clock_skew_in_seconds=60
+        )
+        user_id = idinfo.get("sub")
+
+        # ✅ Delete the vector store directory
+        persist_directory = f"./chroma_db_uploads/user_{user_id}_session_{session_id}"
+        if os.path.exists(persist_directory):
+            shutil.rmtree(persist_directory)
+            return {"message": "File deleted successfully"}
+        else:
+            raise HTTPException(status_code=404, detail="No file found for this session")
+
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/ask")
-async def ask_question(query: Query, token: Optional[str] = Cookie(None)):
+async def ask_question(query: QueryModel, token: Optional[str] = Cookie(None)):
     try:
         user_id = None
         if token:
@@ -288,32 +487,45 @@ async def ask_question(query: Query, token: Optional[str] = Cookie(None)):
             user_id = "anonymous"
          
         session_id = query.session_id or str(uuid.uuid4())
-        personality = query.personality
+        personality = query.personality or "sage"
+        system_prompt = PERSONALITY_PROMPTS.get(personality, PERSONALITY_PROMPTS["sage"])
+
+        if query.has_file:
+            chunks = get_relevant_chunks(query.question, user_id, session_id)
+        else:
+            chunks = []
         
-        chunks = get_relevant_chunks(query.question)
-        if not chunks:
-            return {"answer": "No relevant information found."}
-        context = "\n\n".join(chunks)
-        prompt = f"""Use the context below to answer the question. Do not include ** in your answer. 
-                    Do not include any disclaimers or apologies in your answer. 
-                    If user asked about the source of the context or asks outside the context, say that you cannot provide that information. 
-                    If the user is asking about harry potter related information, you can answer it using internal knowledge if context is not sufficient.
-                    Do not talk about the context or how you are using it in your answer. Dont say "texts from the context" or "the context says" or similar phrases.   
-    
-Context:
+        if query.has_file:
+            chunks = get_relevant_chunks(query.question, user_id, session_id)
+        else:
+            chunks = []
+        
+        # Generate response
+        if chunks:
+            context = "\n\n".join(chunks)
+            prompt = f"""You are {personality.title()}, but you must prioritize the uploaded document content.  
+IMPORTANT: Answer ONLY based on the context below. If the question cannot be answered from the context, say "I cannot find that information in the uploaded document."
+Context from uploaded document:
 {context}
 
-Question:
-{query.question}
-"""
-        answer = llm.generate(prompt)
+User Question: {query.question}
 
+Answer as {personality.title()} using ONLY the information from the context above."""
+        else:
+            prompt = f"""{system_prompt}
+
+User Question: {query.question}
+Note: No document context available. Please respond according to your personality."""
+
+        answer = llm.generate(prompt)
+        
+        # Save messages
         user_message = {
             "user_id": user_id,
             "session_id": session_id,
             "message": query.question,
             "is_user": True,
-            "personality":  query.personality,
+            "personality": personality,
         }
         supabase.table("chat_messages").insert(user_message).execute()
 
@@ -322,10 +534,11 @@ Question:
             "user_id": user_id,
             "message": answer,
             "is_user": False,
-            "personality": query.personality
+            "personality": personality,
         }
         supabase.table("chat_messages").insert(ai_message).execute()
 
         return {"answer": answer, "session_id": session_id}
+        
     except Exception as e:
-        return JSONResponse(status_code=500, content={"answer": f"Error processing request: {str(e)}"})
+        return JSONResponse(status_code=500, content={"answer": f"Error: {str(e)}"})
