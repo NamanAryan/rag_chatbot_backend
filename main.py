@@ -220,12 +220,14 @@ def auth_callback(request: Request, code: str, state: Optional[str] = None):
         print(f"Unexpected error during OAuth: {e}")
         return RedirectResponse(url="http://localhost:5173/login?error=unexpected_error")
 
+from fastapi.responses import RedirectResponse
+
 @app.get("/protected")
 async def protected_route(token: Optional[str] = Cookie(None)):
     CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID") 
     
     if not token:
-        raise HTTPException(status_code=401, detail="No token found")
+        return RedirectResponse(url="/login", status_code=302)
     
     try:
         idinfo = id_token.verify_oauth2_token(
@@ -236,7 +238,9 @@ async def protected_route(token: Optional[str] = Cookie(None)):
         )
         return {"message": f"Hello {idinfo['name']}!", "user": idinfo}
     except ValueError as e:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
+        print(f"Token validation failed: {str(e)}")
+        return RedirectResponse(url="/login", status_code=302)
+
 
 @app.post("/logout")
 async def logout():
