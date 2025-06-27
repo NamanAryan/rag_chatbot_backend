@@ -45,6 +45,8 @@ class QueryModel(BaseModel):
     system_prompt: Optional[str] = None
     has_file: Optional[bool] = False
 
+VITE_DEV_SERVER_URL = os.getenv("VITE_DEV_SERVER_URL")
+
 @app.get("/")
 async def root():
     return {"message": "Welcome to the Gemini LLM API!"}
@@ -134,7 +136,7 @@ async def google_auth_url():
     CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
     if not CLIENT_ID:   
         raise HTTPException(status_code=500, detail="GOOGLE_CLIENT_ID not set in environment variables.")
-    REDIRECT_URI = "http://localhost:8000/auth/callback"
+    REDIRECT_URI = 'f{VITE_DEV_SERVER_URL}/auth/callback'
     SCOPES = ["openid", "email", "profile"]
 
     auth_url = (
@@ -146,6 +148,10 @@ async def google_auth_url():
     )
     return {"url": auth_url}
 
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "timestamp": time.time()}
+
 @app.get("/auth/callback")
 def auth_callback(request: Request, code: str, state: Optional[str] = None):
     CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
@@ -154,7 +160,7 @@ def auth_callback(request: Request, code: str, state: Optional[str] = None):
     CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
     if not CLIENT_SECRET:
         raise HTTPException(status_code=500, detail="GOOGLE_CLIENT_SECRET not set in environment variables.")
-    REDIRECT_URI = "http://localhost:8000/auth/callback"
+    REDIRECT_URI = f"http://localhost:8000/auth/callback"
 
     try:
         # Step 1: Exchange code for tokens
@@ -171,14 +177,14 @@ def auth_callback(request: Request, code: str, state: Optional[str] = None):
 
         if token_res.status_code != 200:
             print(f"Token exchange failed: {token_res.status_code} - {token_res.text}")
-            return RedirectResponse(url="http://localhost:5173/login?error=token_exchange_failed")
+            return RedirectResponse(url=f"{VITE_DEV_SERVER_URL}/login?error=token_exchange_failed")
 
         token_json = token_res.json()
         id_token_str = token_json.get("id_token")
         
         if not id_token_str:
             print("No id_token in response:", token_json)
-            return RedirectResponse(url="http://localhost:5173/login?error=no_id_token")
+            return RedirectResponse(url=f"{VITE_DEV_SERVER_URL}/login?error=no_id_token")
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -199,10 +205,10 @@ def auth_callback(request: Request, code: str, state: Optional[str] = None):
                     continue
                 else:
                     print(f"Token verification failed after {max_retries} attempts: {e}")
-                    return RedirectResponse(url="http://localhost:5173/login?error=token_verification_failed")
+                    return RedirectResponse(url=f"{VITE_DEV_SERVER_URL}/login?error=token_verification_failed")
 
         # Success - set cookie and redirect
-        response = RedirectResponse(url="http://localhost:5173/google")
+        response = RedirectResponse(url=f"{VITE_DEV_SERVER_URL}/google")
         response.set_cookie(
             key="token", 
             value=id_token_str, 
@@ -215,10 +221,10 @@ def auth_callback(request: Request, code: str, state: Optional[str] = None):
 
     except requests.RequestException as e:
         print(f"Network error during OAuth: {e}")
-        return RedirectResponse(url="http://localhost:5173/login?error=network_error")
+        return RedirectResponse(url=f"{VITE_DEV_SERVER_URL}/login?error=network_error")
     except Exception as e:
         print(f"Unexpected error during OAuth: {e}")
-        return RedirectResponse(url="http://localhost:5173/login?error=unexpected_error")
+        return RedirectResponse(url=f'{VITE_DEV_SERVER_URL}/login?error=unexpected_error')
 
 from fastapi.responses import RedirectResponse
 
