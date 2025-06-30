@@ -5,7 +5,12 @@ from typing import List, Optional
 import os
 from pathlib import Path
 
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2",
+    model_kwargs={'device': 'cpu'},
+    encode_kwargs={'normalize_embeddings': True},
+    cache_folder="/app/cache/sentence_transformers"
+)
 
 def get_page_contents(results):
     return [result.page_content for result in results]

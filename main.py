@@ -32,7 +32,11 @@ load_dotenv()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
+    allow_origins=[
+        "http://localhost:5173",  
+        "http://localhost:3000", 
+        "http://127.0.0.1:5173",  
+    ],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -46,7 +50,8 @@ class QueryModel(BaseModel):
     has_file: Optional[bool] = False
 
 VITE_DEV_SERVER_URL = os.getenv("VITE_DEV_SERVER_URL")
-
+VITE_BACKEND_URL = os.getenv("VITE_BACKEND_URL")
+print(f"VITE_DEV_SERVER_URL: {VITE_DEV_SERVER_URL}")
 @app.get("/")
 async def root():
     return {"message": "Welcome to the Gemini LLM API!"}
@@ -136,7 +141,7 @@ async def google_auth_url():
     CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
     if not CLIENT_ID:   
         raise HTTPException(status_code=500, detail="GOOGLE_CLIENT_ID not set in environment variables.")
-    REDIRECT_URI = 'f{VITE_DEV_SERVER_URL}/auth/callback'
+    REDIRECT_URI = f'{VITE_BACKEND_URL}/auth/callback'
     SCOPES = ["openid", "email", "profile"]
 
     auth_url = (
@@ -160,7 +165,7 @@ def auth_callback(request: Request, code: str, state: Optional[str] = None):
     CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
     if not CLIENT_SECRET:
         raise HTTPException(status_code=500, detail="GOOGLE_CLIENT_SECRET not set in environment variables.")
-    REDIRECT_URI = f"http://localhost:8000/auth/callback"
+    REDIRECT_URI = f"{VITE_BACKEND_URL}/auth/callback"
 
     try:
         # Step 1: Exchange code for tokens
