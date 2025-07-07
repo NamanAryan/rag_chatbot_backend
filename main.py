@@ -2,6 +2,7 @@ import shutil
 from fastapi import FastAPI, Request, Depends, HTTPException, Cookie
 from fastapi import Query
 from fastapi.middleware.cors import CORSMiddleware
+from gotrue import Subscription
 from pydantic import BaseModel
 import requests
 import os
@@ -61,7 +62,7 @@ async def root():
 async def upload_file(
     file: UploadFile = File(...),
     session_id: str = Form(...),
-    personality: str = Form(default="sage"),
+    personality: str = Form(default="scholar"),
     token: Optional[str] = Cookie(None)
 ):
     try:
@@ -169,7 +170,6 @@ def auth_callback(request: Request, code: str, state: Optional[str] = None):
     REDIRECT_URI = f"{VITE_BACKEND_URL}/auth/callback"
 
     try:
-        # Step 1: Exchange code for tokens
         token_res = requests.post("https://oauth2.googleapis.com/token", 
             data={
                 "code": code,
@@ -484,9 +484,42 @@ async def delete_uploaded_file(session_id: str, token: Optional[str] = Cookie(No
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+async def getChatHistory(session_id: str, user_id: str, limit: int = 10):
+    """Fetch recent chat history for the session"""
+    try:
+        response = supabase.table("chat_messages")\
+            .select("message, is_user, created_at")\
+            .eq("session_id", session_id)\
+            .eq("user_id", user_id)\
+            .order("created_at", desc=False)\
+            .limit(limit)\
+            .execute()
+        
+        return response.data if response.data else []
+    except Exception as e:
+        print(f"Error fetching chat history: {str(e)}")
+        return []
+
+def format_conversation_history(history, personality):
+    """Format chat history into a readable string"""
+    if not history:
+        return ""
+    
+    formatted = []
+    for msg in history:
+        speaker = "User" if msg["is_user"] else personality.title()
+        formatted.append(f"{speaker}: {msg['message']}")
+    
+    return "\n".join(formatted)
+
+
 @app.post("/ask")
 async def ask_question(query: QueryModel, token: Optional[str] = Cookie(None)):
     try:
+        if not query.question or not query.question.strip():
+            return JSONResponse(status_code=400, content={"answer": "Question cannot be empty"})
+        
         user_id = None
         if token:
             try:
@@ -497,64 +530,86 @@ async def ask_question(query: QueryModel, token: Optional[str] = Cookie(None)):
                     clock_skew_in_seconds=60
                 )
                 user_id = idinfo.get("sub")
-            except ValueError:
+            except ValueError as e:
+                print(f"Token verification failed: {str(e)}")
                 user_id = "anonymous"
         else:
             user_id = "anonymous"
          
         session_id = query.session_id or str(uuid.uuid4())
-        personality = query.personality or "sage"
-        system_prompt = PERSONALITY_PROMPTS.get(personality, PERSONALITY_PROMPTS["sage"])
+        personality = query.personality or "scholar"
+        system_prompt = PERSONALITY_PROMPTS.get(personality, PERSONALITY_PROMPTS["scholar"])
 
-        if query.has_file:
-            chunks = get_relevant_chunks(query.question, user_id, session_id)
-        else:
-            chunks = []
+        chat_history = await getChatHistory(session_id, user_id, limit=8)
+        conversation_context = format_conversation_history(chat_history, personality)
         
+        chunks = []
         if query.has_file:
-            chunks = get_relevant_chunks(query.question, user_id, session_id)
-        else:
-            chunks = []
-        
-        # Generate response
+            try:
+                chunks = get_relevant_chunks(query.question, user_id, session_id)
+            except Exception as e:
+                print(f"Error getting relevant chunks: {str(e)}")
+                chunks = []
+
         if chunks:
             context = "\n\n".join(chunks)
-            prompt = f"""You are {personality.title()}, but you must prioritize the uploaded document content.  
-IMPORTANT: Answer ONLY based on the context below. If the question cannot be answered from the context, say "I cannot find that information in the uploaded document."
+            prompt = f"""You are {personality.title()}, {system_prompt}.,
+IMPORTANT: Answer ONLY based on the context below. If the question cannot be answered from the context, say "I cannot find that information in the uploaded document." Dont use ** in your answer to bold texts.
+
 Context from uploaded document:
 {context}
 
+Conversation history:
+{conversation_context}
+
 User Question: {query.question}
 
-Answer as {personality.title()} using ONLY the information from the context above."""
+Answer as {personality.title()} using ONLY the information from the context above, while being aware of our conversation history. Make sure to highlight your personality in your response."""
         else:
             prompt = f"""{system_prompt}
 
+Conversation history:
+{conversation_context}
+Dont use ** in your answer to bold texts.
 User Question: {query.question}
-Note: No document context available. Please respond according to your personality."""
 
-        answer = llm.generate(prompt)
-        
-        # Save messages
-        user_message = {
-            "user_id": user_id,
-            "session_id": session_id,
-            "message": query.question,
-            "is_user": True,
-            "personality": personality,
-        }
-        supabase.table("chat_messages").insert(user_message).execute()
+Answer as {personality.title()}, keeping in mind our previous conversation."""
 
-        ai_message = {
-            "session_id": session_id,
-            "user_id": user_id,
-            "message": answer,
-            "is_user": False,
-            "personality": personality,
-        }
-        supabase.table("chat_messages").insert(ai_message).execute()
+        try:
+            answer = llm.generate(prompt)
+            if not answer or not answer.strip():
+                answer = "I apologize, but I couldn't generate a response. Please try again."
+        except Exception as e:
+            print(f"Error generating AI response: {str(e)}")
+            answer = "I'm experiencing technical difficulties. Please try again later."
+
+        try:
+            user_message = {
+                "user_id": user_id,
+                "session_id": session_id,
+                "message": query.question,
+                "is_user": True,
+                "personality": personality,
+            }
+            supabase.table("chat_messages").insert(user_message).execute()
+
+            ai_message = {
+                "session_id": session_id,
+                "user_id": user_id,
+                "message": answer,
+                "is_user": False,
+                "personality": personality,
+            }
+            supabase.table("chat_messages").insert(ai_message).execute()
+        except Exception as e:
+            print(f"Error saving messages to database: {str(e)}")
+            # Continue execution even if database save fails
 
         return {"answer": answer, "session_id": session_id}
         
     except Exception as e:
+        print(f"Unexpected error in /ask endpoint: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return JSONResponse(status_code=500, content={"answer": f"Error: {str(e)}"})
+
