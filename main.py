@@ -236,22 +236,29 @@ from fastapi.responses import RedirectResponse
 
 @app.get("/protected")
 async def protected_route(token: Optional[str] = Cookie(None)):
-    CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID") 
-    
     if not token:
-        return RedirectResponse(url="/login", status_code=302)
+        raise HTTPException(status_code=401, detail="No authentication token")
     
     try:
         idinfo = id_token.verify_oauth2_token(
             token,
             GoogleRequest(),
-            CLIENT_ID,
+            os.getenv("GOOGLE_CLIENT_ID"),
             clock_skew_in_seconds=60
         )
-        return {"message": f"Hello {idinfo['name']}!", "user": idinfo}
+        
+        return {
+            "message": "Authenticated",
+            "user": {
+                "id": idinfo.get("sub"),
+                "email": idinfo.get("email"),
+                "name": idinfo.get("name"),
+                "picture": idinfo.get("picture")
+            }
+        }
     except ValueError as e:
-        print(f"Token validation failed: {str(e)}")
-        return RedirectResponse(url="/login", status_code=302)
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
 
 
 @app.post("/logout")
