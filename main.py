@@ -1,5 +1,5 @@
 import shutil
-from fastapi import FastAPI, Request, Depends, HTTPException, Cookie
+from fastapi import FastAPI, Header, Request, Depends, HTTPException, Cookie
 from fastapi import Query
 from fastapi.middleware.cors import CORSMiddleware
 from gotrue import Subscription
@@ -169,13 +169,8 @@ async def health_check():
 @app.get("/auth/callback")
 def auth_callback(request: Request, code: str, state: Optional[str] = None):
     CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-    if not CLIENT_ID:
-        raise HTTPException(status_code=500, detail="GOOGLE_CLIENT_ID not set in environment variables.")
     CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-    if not CLIENT_SECRET:
-        raise HTTPException(status_code=500, detail="GOOGLE_CLIENT_SECRET not set in environment variables.")
     REDIRECT_URI = f"{VITE_BACKEND_URL}/auth/callback"
-
     try:
         token_res = requests.post("https://oauth2.googleapis.com/token", 
             data={
@@ -208,7 +203,8 @@ def auth_callback(request: Request, code: str, state: Optional[str] = None):
                     clock_skew_in_seconds=60
                 )
                 print(f"Token verification successful on attempt {attempt + 1}")
-                break
+                redirect_url = f"{VITE_DEV_SERVER_URL}/google?token={id_token_str}"
+                return RedirectResponse(url=redirect_url)
                 
             except ValueError as e:
                 if attempt < max_retries - 1:
@@ -242,13 +238,24 @@ def auth_callback(request: Request, code: str, state: Optional[str] = None):
 from fastapi.responses import RedirectResponse
 
 @app.get("/protected")
-async def protected_route(token: Optional[str] = Cookie(None)):
-    if not token:
+async def protected_route(
+    authorization: Optional[str] = Header(None),
+    token: Optional[str] = Cookie(None)  # Keep cookie as fallback
+):
+    # Try Authorization header first, then cookie
+    auth_token = None
+    
+    if authorization and authorization.startswith("Bearer "):
+        auth_token = authorization.split(" ")[1]
+    elif token:
+        auth_token = token
+    
+    if not auth_token:
         raise HTTPException(status_code=401, detail="No authentication token")
     
     try:
         idinfo = id_token.verify_oauth2_token(
-            token,
+            auth_token,
             GoogleRequest(),
             os.getenv("GOOGLE_CLIENT_ID"),
             clock_skew_in_seconds=60
@@ -265,6 +272,7 @@ async def protected_route(token: Optional[str] = Cookie(None)):
         }
     except ValueError as e:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+
 
 
 
