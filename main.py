@@ -95,18 +95,26 @@ async def upload_file(
     authorization: Optional[str] = Header(None),
     token: Optional[str] = Cookie(None)
 ):
-    auth_token = extract_auth_token(authorization, token)
-    user_id = verify_user_token(auth_token)
     try:
         print(f"📁 Received file: {file.filename}, size: {file.size}")
         print(f"📍 Session ID: {session_id}")
         print(f"🎭 Personality: {personality}") 
 
-        if not token:
+        # ✅ Extract token from Authorization header or cookie
+        auth_token = None
+        if authorization and authorization.startswith("Bearer "):
+            auth_token = authorization.split(" ")[1]
+            print("✅ Using Authorization header for authentication")
+        elif token:
+            auth_token = token
+            print("✅ Using cookie for authentication")
+        
+        if not auth_token:
             raise HTTPException(status_code=401, detail="Authentication required")
         
+        # ✅ Verify token once and use the result
         idinfo = id_token.verify_oauth2_token(
-            token,
+            auth_token,  # Use the extracted token, not just cookie
             GoogleRequest(),
             os.getenv("GOOGLE_CLIENT_ID"),
             clock_skew_in_seconds=60
@@ -118,42 +126,36 @@ async def upload_file(
         if not session_id or session_id == 'null':
             raise HTTPException(status_code=400, detail="Invalid session ID")
 
-        # Extract text from file
+        # Rest of your existing logic remains the same...
         file_content = await extract_text_from_file(file)
         print(f"📄 Extracted text length: {len(file_content)}")
         
         if not file_content.strip():
             raise HTTPException(status_code=400, detail="No text content found in file")
 
-        # ✅ Cross-platform file storage (works on both Windows and Linux/Render)
-        if os.getenv("RENDER"):  # Production environment
+        if os.getenv("RENDER"):
             base_dir = Path("/tmp/chroma_db_uploads")
-        else:  # Local development
+        else:
             base_dir = Path("./chroma_db_uploads")
         
         base_dir.mkdir(parents=True, exist_ok=True)
         persist_directory = base_dir / f"user_{user_id}_session_{session_id}"
         
-        # ✅ Simplified directory cleanup logic
         if persist_directory.exists():
             try:
                 shutil.rmtree(persist_directory)
                 print(f"🗑️ Cleared existing directory: {persist_directory}")
             except PermissionError:
-                # If can't delete, create with timestamp
                 import datetime
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 persist_directory = base_dir / f"user_{user_id}_session_{session_id}_{timestamp}"
                 print(f"⚠️ Using timestamped directory: {persist_directory}")
 
-        # Create directory
         persist_directory.mkdir(parents=True, exist_ok=True)
         
-        # Split text into chunks
         chunks = split_text_into_chunks(file_content)
         print(f"📊 Created {len(chunks)} chunks")
         
-        # Create vector store with proper path
         vectorstore = create_file_vectorstore(chunks, user_id, session_id, str(persist_directory))
         print(f"✅ Vector store created successfully at: {persist_directory}")
 
@@ -162,7 +164,7 @@ async def upload_file(
             "chunks_created": len(chunks),
             "filename": file.filename,
             "session_id": session_id,
-            "storage_path": str(persist_directory)  
+            "storage_path": str(persist_directory)
         }
 
     except HTTPException:
@@ -170,8 +172,9 @@ async def upload_file(
     except Exception as e:
         print(f"❌ Upload error: {str(e)}")
         import traceback
-        traceback.print_exc()  
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/auth/google/url")
 async def google_auth_url():
@@ -397,30 +400,54 @@ async def get_user_sessions(
     authorization: Optional[str] = Header(None),
     token: Optional[str] = Cookie(None)
 ):
-    auth_token = authorization or token
-    if auth_token is None:
-        raise HTTPException(status_code=401, detail="auth_token is required")
+    # ✅ Proper token extraction with Bearer validation
+    auth_token = None
+    if authorization and authorization.startswith("Bearer "):
+        auth_token = authorization.split(" ")[1]
+        print("✅ Using Authorization header for /chat/sessions")
+    elif token:
+        auth_token = token
+        print("✅ Using cookie for /chat/sessions")
     
-    user_id = verify_user_token(auth_token)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
+    # ✅ Use your verify_user_token function if it exists, or inline verification
+    try:
+        idinfo = id_token.verify_oauth2_token(
+            auth_token,
+            GoogleRequest(),
+            os.getenv("GOOGLE_CLIENT_ID"),
+            clock_skew_in_seconds=60
+        )
+        user_id = idinfo.get("sub")
+        
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token or user ID not found")
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
     result = supabase.table("chat_messages") \
-    .select("session_id, message, created_at") \
-    .eq("user_id", user_id) \
-    .eq("is_user", True) \
-    .eq("personality", personality) \
-    .order("created_at", desc=True) \
-    .execute()
+        .select("session_id, message, created_at") \
+        .eq("user_id", user_id) \
+        .eq("is_user", True) \
+        .eq("personality", personality) \
+        .order("created_at", desc=True) \
+        .execute()
 
     sessions = {}
     for msg in result.data:
         session_id = msg["session_id"]
         if session_id not in sessions:
             sessions[session_id] = {
-            "session_id": session_id,
-            "title": msg["message"][:50] + "..." if len(msg["message"]) > 50 else msg["message"],
-            "timestamp": msg["created_at"],
-            "personality": personality
-        }
+                "session_id": session_id,
+                "title": msg["message"][:50] + "..." if len(msg["message"]) > 50 else msg["message"],
+                "timestamp": msg["created_at"],
+                "personality": personality
+            }
+    
     return {"sessions": list(sessions.values())}
+
 
 async def extract_text_from_file(file: UploadFile) -> str:
     content = await file.read()
