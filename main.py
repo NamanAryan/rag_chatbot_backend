@@ -54,7 +54,35 @@ class QueryModel(BaseModel):
 
 VITE_DEV_SERVER_URL = os.getenv("VITE_DEV_SERVER_URL")
 VITE_BACKEND_URL = os.getenv("VITE_BACKEND_URL")
+
 print(f"VITE_DEV_SERVER_URL: {VITE_DEV_SERVER_URL}")
+
+def extract_auth_token(authorization: Optional[str] = None, token: Optional[str] = None) -> str:
+    """Extract authentication token from Authorization header or cookie"""
+    if authorization and authorization.startswith("Bearer "):
+        return authorization.split(" ")[1]
+    elif token:
+        return token
+    else:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+def verify_user_token(auth_token: str) -> str:
+    """Verify token and return user_id"""
+    try:
+        idinfo = id_token.verify_oauth2_token(
+            auth_token,
+            GoogleRequest(),
+            os.getenv("GOOGLE_CLIENT_ID"),
+            clock_skew_in_seconds=60
+        )
+        user_id = idinfo.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token or user ID not found")
+        return user_id
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
 @app.get("/")
 async def root():
     return {"message": "Welcome to the Gemini LLM API!"}
@@ -64,8 +92,11 @@ async def upload_file(
     file: UploadFile = File(...),
     session_id: str = Form(...),
     personality: str = Form(default="scholar"),
+    authorization: Optional[str] = Header(None),
     token: Optional[str] = Cookie(None)
 ):
+    auth_token = extract_auth_token(authorization, token)
+    user_id = verify_user_token(auth_token)
     try:
         print(f"📁 Received file: {file.filename}, size: {file.size}")
         print(f"📍 Session ID: {session_id}")
@@ -141,9 +172,6 @@ async def upload_file(
         import traceback
         traceback.print_exc()  
         raise HTTPException(status_code=500, detail=str(e))
-
-
-
 
 @app.get("/auth/google/url")
 async def google_auth_url():
@@ -240,15 +268,19 @@ from fastapi.responses import RedirectResponse
 @app.get("/protected")
 async def protected_route(
     authorization: Optional[str] = Header(None),
-    token: Optional[str] = Cookie(None)  # Keep cookie as fallback
+    token: Optional[str] = Cookie(None)  # Keep as fallback
 ):
-    # Try Authorization header first, then cookie
+    # Try Authorization header first
     auth_token = None
     
     if authorization and authorization.startswith("Bearer "):
         auth_token = authorization.split(" ")[1]
+        print(f"✅ Received Authorization header: {auth_token[:20]}...")
     elif token:
         auth_token = token
+        print(f"✅ Received cookie token: {token[:20]}...")
+    else:
+        print("❌ No authorization token found in request")
     
     if not auth_token:
         raise HTTPException(status_code=401, detail="No authentication token")
@@ -261,6 +293,8 @@ async def protected_route(
             clock_skew_in_seconds=60
         )
         
+        print(f"✅ Token verified for user: {idinfo.get('email')}")
+        
         return {
             "message": "Authenticated",
             "user": {
@@ -271,10 +305,8 @@ async def protected_route(
             }
         }
     except ValueError as e:
+        print(f"❌ Token verification failed: {str(e)}")
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-
-
 
 @app.post("/logout")
 async def logout():
@@ -292,19 +324,12 @@ async def logout():
 async def delete_chat_session(
     session_id: str, 
     personality: str = Query(...),
+    authorization: Optional[str] = Header(None),
     token: Optional[str] = Cookie(None)
 ):
     try:
-        if not token:
-            raise HTTPException(status_code=401, detail="Authentication required")
-        
-        idinfo = id_token.verify_oauth2_token(
-            token,
-            GoogleRequest(),
-            os.getenv("GOOGLE_CLIENT_ID"),
-            clock_skew_in_seconds=60
-        )
-        user_id = idinfo.get("sub")
+        auth_token = extract_auth_token(authorization, token)
+        user_id = verify_user_token(auth_token)
 
         result = supabase.table("chat_messages") \
             .delete() \
@@ -329,17 +354,16 @@ async def delete_chat_session(
 async def get_chat_history(
     session_id: str, 
     personality: str = Query(...),
+    authorization: Optional[str] = Header(None),
     token: Optional[str] = Cookie(None)
 ):
     try:
         if not session_id:
             raise HTTPException(status_code=400, detail="Session ID is required")
-
-        if not token:
-
-            raise HTTPException(status_code=401, detail="Authentication required")
-
-        
+        auth_token = authorization or token
+        if not auth_token:
+            raise HTTPException(status_code=401, detail="Authentication token is required")
+        user_id = verify_user_token(auth_token)
         idinfo = id_token.verify_oauth2_token(
             token,
             GoogleRequest(),
@@ -370,43 +394,33 @@ async def get_chat_history(
 @app.get("/chat/sessions")
 async def get_user_sessions(
     personality: str = Query(...),
+    authorization: Optional[str] = Header(None),
     token: Optional[str] = Cookie(None)
 ):
-    try:
-        if not token:
-            raise HTTPException(status_code=401, detail="Authentication required")
-        
-        idinfo = id_token.verify_oauth2_token(
-            token,
-            GoogleRequest(),
-            os.getenv("GOOGLE_CLIENT_ID"),
-            clock_skew_in_seconds=60
-        )
-        user_id = idinfo.get("sub")
+    auth_token = authorization or token
+    if auth_token is None:
+        raise HTTPException(status_code=401, detail="auth_token is required")
+    
+    user_id = verify_user_token(auth_token)
+    result = supabase.table("chat_messages") \
+    .select("session_id, message, created_at") \
+    .eq("user_id", user_id) \
+    .eq("is_user", True) \
+    .eq("personality", personality) \
+    .order("created_at", desc=True) \
+    .execute()
 
-        result = supabase.table("chat_messages") \
-            .select("session_id, message, created_at") \
-            .eq("user_id", user_id) \
-            .eq("is_user", True) \
-            .eq("personality", personality) \
-            .order("created_at", desc=True) \
-            .execute()
-
-        sessions = {}
-        for msg in result.data:
-            session_id = msg["session_id"]
-            if session_id not in sessions:
-                sessions[session_id] = {
-                    "session_id": session_id,
-                    "title": msg["message"][:50] + "..." if len(msg["message"]) > 50 else msg["message"],
-                    "timestamp": msg["created_at"],
-                    "personality": personality
-                }
-
-        return {"sessions": list(sessions.values())}
-
-    except ValueError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    sessions = {}
+    for msg in result.data:
+        session_id = msg["session_id"]
+        if session_id not in sessions:
+            sessions[session_id] = {
+            "session_id": session_id,
+            "title": msg["message"][:50] + "..." if len(msg["message"]) > 50 else msg["message"],
+            "timestamp": msg["created_at"],
+            "personality": personality
+        }
+    return {"sessions": list(sessions.values())}
 
 async def extract_text_from_file(file: UploadFile) -> str:
     content = await file.read()
@@ -545,27 +559,20 @@ def format_conversation_history(history, personality):
 
 
 @app.post("/ask")
-async def ask_question(query: QueryModel, token: Optional[str] = Cookie(None)):
+async def ask_question(query: QueryModel,authorization: Optional[str] = Header(None), token: Optional[str] = Cookie(None)):
     try:
         if not query.question or not query.question.strip():
             return JSONResponse(status_code=400, content={"answer": "Question cannot be empty"})
         
         user_id = None
-        if token:
+        if authorization or token:
             try:
-                idinfo = id_token.verify_oauth2_token(
-                    token,
-                    GoogleRequest(),
-                    os.getenv("GOOGLE_CLIENT_ID"),
-                    clock_skew_in_seconds=60
-                )
-                user_id = idinfo.get("sub")
-            except ValueError as e:
-                print(f"Token verification failed: {str(e)}")
+                auth_token = extract_auth_token(authorization, token)
+                user_id = verify_user_token(auth_token)
+            except HTTPException:
                 user_id = "anonymous"
         else:
-            user_id = "anonymous"
-         
+            user_id = "anonymous"               
         session_id = query.session_id or str(uuid.uuid4())
         personality = query.personality or "scholar"
         system_prompt = PERSONALITY_PROMPTS.get(personality, PERSONALITY_PROMPTS["scholar"])
