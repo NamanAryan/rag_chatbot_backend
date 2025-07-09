@@ -220,9 +220,9 @@ def auth_callback(request: Request, code: str, state: Optional[str] = None):
             key="token", 
             value=id_token_str, 
             httponly=True, 
-            secure=False,
+            secure=True if VITE_DEV_SERVER_URL and VITE_DEV_SERVER_URL.startswith("https") else False,
             max_age=3600,
-            samesite="lax"
+            samesite="none"
         )
         return response
 
