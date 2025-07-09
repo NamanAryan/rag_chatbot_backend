@@ -94,17 +94,16 @@ async def upload_file(
         if not file_content.strip():
             raise HTTPException(status_code=400, detail="No text content found in file")
 
-        app_data = Path.home() / "AppData" / "Local" / "RAG_Chatbot" / "chroma_db_uploads"
-        app_data.mkdir(parents=True, exist_ok=True)
+        # ✅ Cross-platform file storage (works on both Windows and Linux/Render)
+        if os.getenv("RENDER"):  # Production environment
+            base_dir = Path("/tmp/chroma_db_uploads")
+        else:  # Local development
+            base_dir = Path("./chroma_db_uploads")
         
-        persist_directory = app_data / f"user_{user_id}_session_{session_id}"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        persist_directory = base_dir / f"user_{user_id}_session_{session_id}"
         
-        # Remove existing directory safely
-        if persist_directory.exists():
-            shutil.rmtree(persist_directory)
-            print(f"🗑️ Cleared existing directory: {persist_directory}")
-
-        # Ensure directory exists
+        # ✅ Simplified directory cleanup logic
         if persist_directory.exists():
             try:
                 shutil.rmtree(persist_directory)
@@ -113,29 +112,36 @@ async def upload_file(
                 # If can't delete, create with timestamp
                 import datetime
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                persist_directory = app_data / f"user_{user_id}_session_{session_id}_{timestamp}"
+                persist_directory = base_dir / f"user_{user_id}_session_{session_id}_{timestamp}"
+                print(f"⚠️ Using timestamped directory: {persist_directory}")
 
+        # Create directory
         persist_directory.mkdir(parents=True, exist_ok=True)
+        
         # Split text into chunks
         chunks = split_text_into_chunks(file_content)
         print(f"📊 Created {len(chunks)} chunks")
         
-        # Create vector store
-        vectorstore = create_file_vectorstore(chunks, user_id, session_id)
-        print(f"✅ Vector store created successfully")
+        # Create vector store with proper path
+        vectorstore = create_file_vectorstore(chunks, user_id, session_id, str(persist_directory))
+        print(f"✅ Vector store created successfully at: {persist_directory}")
 
         return {
             "message": "File uploaded successfully",
             "chunks_created": len(chunks),
             "filename": file.filename,
-            "session_id": session_id
+            "session_id": session_id,
+            "storage_path": str(persist_directory)  
         }
 
     except HTTPException:
         raise
     except Exception as e:
         print(f"❌ Upload error: {str(e)}")
+        import traceback
+        traceback.print_exc()  
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 
@@ -268,8 +274,9 @@ async def logout():
     response.delete_cookie(
         key="token",
         httponly=True,
-        secure=False,
-        samesite="lax"
+        secure=True,        
+        samesite="none",    
+        domain=None        
     )
     return response
 
@@ -479,11 +486,17 @@ async def delete_uploaded_file(session_id: str, token: Optional[str] = Cookie(No
         )
         user_id = idinfo.get("sub")
 
-        # ✅ Delete the vector store directory
-        persist_directory = f"./chroma_db_uploads/user_{user_id}_session_{session_id}"
-        if os.path.exists(persist_directory):
+        # ✅ Use consistent path logic
+        if os.getenv("RENDER"):
+            base_dir = Path("/tmp/chroma_db_uploads")
+        else:
+            base_dir = Path("./chroma_db_uploads")
+            
+        persist_directory = base_dir / f"user_{user_id}_session_{session_id}"
+        
+        if persist_directory.exists():
             shutil.rmtree(persist_directory)
-            return {"message": "File deleted successfully"}
+            return {"message": "File deleted successfully", "deleted_path": str(persist_directory)}
         else:
             raise HTTPException(status_code=404, detail="No file found for this session")
 
@@ -491,6 +504,7 @@ async def delete_uploaded_file(session_id: str, token: Optional[str] = Cookie(No
         raise HTTPException(status_code=401, detail="Invalid token")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 async def getChatHistory(session_id: str, user_id: str, limit: int = 10):

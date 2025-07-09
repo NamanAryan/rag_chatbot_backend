@@ -49,36 +49,28 @@ def get_relevant_chunks(query: str, user_id: Optional[str] = None, session_id: O
 
 
 
-def create_file_vectorstore(documents: List[str], user_id: str, session_id: str, personality: str = "sage"):
-    try:
-        app_data = Path.home() / "AppData" / "Local" / "RAG_Chatbot" / "chroma_db_uploads"
-        persist_directory = app_data / f"user_{user_id}_session_{session_id}"
-        persist_directory.mkdir(parents=True, exist_ok=True)
-        
-        print(f"Creating vector store at: {persist_directory}")
-
-        vectorstore = Chroma(
-            persist_directory=str(persist_directory),
-            embedding_function=embeddings
-        )
-
-        for i, chunk in enumerate(documents):
-            vectorstore.add_texts(
-                texts=[chunk],
-                metadatas=[{
-                    "chunk_index": i,
-                    "user_id": user_id,
-                    "session_id": session_id,
-                    "personality": personality
-                }],
-                ids=[f"chunk_{i}"]
-            )
-        
-        print(f"Vector store created with {len(documents)} chunks")
-        return vectorstore
-        
-    except Exception as e:
-        print(f"Error in create_file_vectorstore: {e}")
-        raise Exception(f"Vector store creation failed: {str(e)}")
-
-
+def create_file_vectorstore(chunks: List[str], user_id: str, session_id: str, persist_directory:Optional[str] = None) :
+    """Create vector store with explicit persist directory"""
+    from langchain_huggingface import HuggingFaceEmbeddings
+    from langchain_chroma import Chroma
+    
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={'device': 'cpu'},
+        encode_kwargs={'normalize_embeddings': True}
+    )
+    
+    # Use provided persist_directory or fallback to default logic
+    if not persist_directory:
+        if os.getenv("RENDER"):
+            persist_directory = f"/tmp/chroma_db_uploads/user_{user_id}_session_{session_id}"
+        else:
+            persist_directory = f"./chroma_db_uploads/user_{user_id}_session_{session_id}"
+    
+    vectorstore = Chroma.from_texts(
+        texts=chunks,
+        embedding=embeddings,
+        persist_directory=persist_directory
+    )
+    
+    return vectorstore
