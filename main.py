@@ -214,15 +214,15 @@ def auth_callback(request: Request, code: str, state: Optional[str] = None):
                     print(f"Token verification failed after {max_retries} attempts: {e}")
                     return RedirectResponse(url=f"{VITE_DEV_SERVER_URL}/login?error=token_verification_failed")
 
-        # Success - set cookie and redirect
         response = RedirectResponse(url=f"{VITE_DEV_SERVER_URL}/google")
         response.set_cookie(
             key="token", 
             value=id_token_str, 
             httponly=True, 
-            secure=True if VITE_DEV_SERVER_URL and VITE_DEV_SERVER_URL.startswith("https") else False,
+            secure=True, 
             max_age=3600,
-            samesite="none"
+            samesite="none", 
+            domain=None  
         )
         return response
 
