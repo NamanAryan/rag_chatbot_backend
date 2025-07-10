@@ -126,33 +126,41 @@ async def upload_file(
         if not session_id or session_id == 'null':
             raise HTTPException(status_code=400, detail="Invalid session ID")
 
-        # Rest of your existing logic remains the same...
+        # Extract and validate file content
         file_content = await extract_text_from_file(file)
         print(f"📄 Extracted text length: {len(file_content)}")
         
         if not file_content.strip():
             raise HTTPException(status_code=400, detail="No text content found in file")
 
+        # Set base directory based on environment
         if os.getenv("RENDER"):
             base_dir = Path("/tmp/chroma_db_uploads")
         else:
             base_dir = Path("./chroma_db_uploads")
         
         base_dir.mkdir(parents=True, exist_ok=True)
-        persist_directory = base_dir / f"user_{user_id}_session_{session_id}"
         
-        if persist_directory.exists():
+        # ✅ FIXED: Always use timestamped directories to avoid conflicts
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        persist_directory = base_dir / f"user_{user_id}_session_{session_id}_{timestamp}"
+        
+        # Clean up old directories for this session first
+        pattern = f"user_{user_id}_session_{session_id}*"
+        for old_dir in base_dir.glob(pattern):
             try:
-                shutil.rmtree(persist_directory)
-                print(f"🗑️ Cleared existing directory: {persist_directory}")
-            except PermissionError:
-                import datetime
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                persist_directory = base_dir / f"user_{user_id}_session_{session_id}_{timestamp}"
-                print(f"⚠️ Using timestamped directory: {persist_directory}")
+                shutil.rmtree(old_dir)
+                print(f"🗑️ Cleaned up old directory: {old_dir}")
+            except Exception as cleanup_error:
+                print(f"⚠️ Could not clean up {old_dir}: {cleanup_error}")
+                pass  # Continue even if cleanup fails
 
+        # Create new directory
         persist_directory.mkdir(parents=True, exist_ok=True)
+        print(f"📁 Created directory: {persist_directory}")
         
+        # Process text and create vector store
         chunks = split_text_into_chunks(file_content)
         print(f"📊 Created {len(chunks)} chunks")
         
@@ -164,7 +172,9 @@ async def upload_file(
             "chunks_created": len(chunks),
             "filename": file.filename,
             "session_id": session_id,
-            "storage_path": str(persist_directory)
+            "storage_path": str(persist_directory),
+            "directory_name": persist_directory.name,  # Include actual directory name
+            "timestamp": timestamp  # Include timestamp for reference
         }
 
     except HTTPException:
@@ -174,6 +184,7 @@ async def upload_file(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.get("/auth/google/url")
