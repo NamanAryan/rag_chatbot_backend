@@ -596,11 +596,18 @@ def format_conversation_history(history, personality):
 
 
 @app.post("/ask")
-async def ask_question(query: QueryModel,authorization: Optional[str] = Header(None), token: Optional[str] = Cookie(None)):
+async def ask_question(query: QueryModel, authorization: Optional[str] = Header(None), token: Optional[str] = Cookie(None)):
     try:
+        # Validate input
         if not query.question or not query.question.strip():
             return JSONResponse(status_code=400, content={"answer": "Question cannot be empty"})
         
+        # 🔍 DEBUG: Print the entire query object
+        print(f"📨 Received query: {query}")
+        print(f"🎭 Query personality: {query.personality}")
+        print(f"📝 Query system_prompt: {query.system_prompt}")
+        
+        # Extract user ID from token
         user_id = None
         if authorization or token:
             try:
@@ -610,25 +617,41 @@ async def ask_question(query: QueryModel,authorization: Optional[str] = Header(N
                 user_id = "anonymous"
         else:
             user_id = "anonymous"               
+        
+        # Set session and personality
         session_id = query.session_id or str(uuid.uuid4())
         personality = query.personality or "scholar"
-        system_prompt = PERSONALITY_PROMPTS.get(personality, PERSONALITY_PROMPTS["scholar"])
-
+        
+        # 🔍 DEBUG: Log personality processing
+        print(f"🎭 Received personality: {personality}")
+        print(f"📝 Available personalities: {list(PERSONALITY_PROMPTS.keys())}")
+        
+        # Get system prompt - use from query first, then fallback to PERSONALITY_PROMPTS
+        if hasattr(query, 'system_prompt') and query.system_prompt:
+            system_prompt = query.system_prompt
+            print(f"💬 Using system prompt from query: {system_prompt[:100]}...")
+        else:
+            system_prompt = PERSONALITY_PROMPTS.get(personality, PERSONALITY_PROMPTS["scholar"])
+        # Get chat history
         chat_history = await getChatHistory(session_id, user_id, limit=8)
         conversation_context = format_conversation_history(chat_history, personality)
         
+        # Handle file chunks if uploaded
         chunks = []
         if query.has_file:
             try:
                 chunks = get_relevant_chunks(query.question, user_id, session_id)
+                print(f"📁 Found {len(chunks)} relevant chunks")
             except Exception as e:
                 print(f"Error getting relevant chunks: {str(e)}")
                 chunks = []
 
+        # Build prompt based on whether we have file chunks
         if chunks:
             context = "\n\n".join(chunks)
-            prompt = f"""You are {personality.title()}, {system_prompt}.,
-IMPORTANT: Answer ONLY based on the context below. If the question cannot be answered from the context, say "I cannot find that information in the uploaded document." Dont use ** in your answer to bold texts.
+            prompt = f"""You are {personality.title()}, {system_prompt}
+
+IMPORTANT: Answer ONLY based on the context below. If the question cannot be answered from the context, say "I cannot find that information in the uploaded document." Don't use ** in your answer to bold texts.
 
 Context from uploaded document:
 {context}
@@ -644,19 +667,30 @@ Answer as {personality.title()} using ONLY the information from the context abov
 
 Conversation history:
 {conversation_context}
-Dont use ** in your answer to bold texts.
+
+Don't use ** in your answer to bold texts.
+
 User Question: {query.question}
 
 Answer as {personality.title()}, keeping in mind our previous conversation."""
 
+        # 🔍 DEBUG: Log the final prompt
+        print(f"🤖 Final prompt: {prompt[:200]}...")
+
+        # Generate AI response
         try:
             answer = llm.generate(prompt)
             if not answer or not answer.strip():
                 answer = "I apologize, but I couldn't generate a response. Please try again."
+            
+            # 🔍 DEBUG: Log the AI response
+            print(f"🤖 AI Response: {answer[:100]}...")
+            
         except Exception as e:
             print(f"Error generating AI response: {str(e)}")
             answer = "I'm experiencing technical difficulties. Please try again later."
 
+        # Save messages to database
         try:
             user_message = {
                 "user_id": user_id,
@@ -675,6 +709,9 @@ Answer as {personality.title()}, keeping in mind our previous conversation."""
                 "personality": personality,
             }
             supabase.table("chat_messages").insert(ai_message).execute()
+            
+            print(f"💾 Messages saved to database with personality: {personality}")
+            
         except Exception as e:
             print(f"Error saving messages to database: {str(e)}")
             # Continue execution even if database save fails
@@ -686,4 +723,5 @@ Answer as {personality.title()}, keeping in mind our previous conversation."""
         import traceback
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"answer": f"Error: {str(e)}"})
+
 
