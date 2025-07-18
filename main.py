@@ -411,7 +411,6 @@ async def get_user_sessions(
     authorization: Optional[str] = Header(None),
     token: Optional[str] = Cookie(None)
 ):
-    # ✅ Proper token extraction with Bearer validation
     auth_token = None
     if authorization and authorization.startswith("Bearer "):
         auth_token = authorization.split(" ")[1]
@@ -423,7 +422,7 @@ async def get_user_sessions(
     if not auth_token:
         raise HTTPException(status_code=401, detail="Authentication required")
     
-    # ✅ Use your verify_user_token function if it exists, or inline verification
+    print(f"🎭 Requested personality: {personality}")
     try:
         idinfo = id_token.verify_oauth2_token(
             auth_token,
