@@ -366,43 +366,74 @@ async def delete_chat_session(
 
 @app.get("/chat/history")
 async def get_chat_history(
-    session_id: str, 
+    session_id: str = Query(...), 
     personality: str = Query(...),
     authorization: Optional[str] = Header(None),
     token: Optional[str] = Cookie(None)
 ):
     try:
+        print(f"🔍 GET /chat/history - session_id: {session_id}, personality: {personality}")
+        
         if not session_id:
             raise HTTPException(status_code=400, detail="Session ID is required")
-        auth_token = authorization or token
+        
+        # ✅ Proper token extraction
+        auth_token = None
+        if authorization and authorization.startswith("Bearer "):
+            auth_token = authorization.split(" ")[1]
+            print("✅ Using Authorization header")
+        elif token:
+            auth_token = token
+            print("✅ Using cookie token")
+        
         if not auth_token:
             raise HTTPException(status_code=401, detail="Authentication token is required")
-        user_id = verify_user_token(auth_token)
-        idinfo = id_token.verify_oauth2_token(
-            token,
-            GoogleRequest(),
-            os.getenv("GOOGLE_CLIENT_ID"),
-            clock_skew_in_seconds=60
-        )
-        user_id = idinfo.get("sub")
         
-        result = supabase.table("chat_messages") \
-            .select("*") \
-            .eq("session_id", session_id) \
-            .eq("user_id", user_id) \
-            .eq("personality", personality) \
-            .order("created_at") \
-            .execute()
+        # ✅ Single token verification
+        try:
+            idinfo = id_token.verify_oauth2_token(
+                auth_token,  # Use the extracted token
+                GoogleRequest(),
+                os.getenv("GOOGLE_CLIENT_ID"),
+                clock_skew_in_seconds=60
+            )
+            user_id = idinfo.get("sub")
+            
+            if not user_id:
+                raise HTTPException(status_code=401, detail="Invalid token or user ID not found")
+                
+        except ValueError as ve:
+            print(f"❌ Token verification failed: {ve}")
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        print(f"🔍 Querying for user_id: {user_id}")
+        
+        # ✅ Database query with error handling
+        try:
+            result = supabase.table("chat_messages") \
+                .select("*") \
+                .eq("session_id", session_id) \
+                .eq("user_id", user_id) \
+                .eq("personality", personality) \
+                .order("created_at") \
+                .execute()
+            
+            print(f"📊 Found {len(result.data)} messages")
+            return {"messages": result.data}
+            
+        except Exception as db_error:
+            print(f"❌ Database error: {db_error}")
+            raise HTTPException(status_code=500, detail=f"Database error: {str(db_error)}")
 
-        
-        return {"messages": result.data}
-
-    except ValueError as e:
-        
-        raise HTTPException(status_code=401, detail="Invalid token")
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
-        
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"❌ Unexpected error in /chat/history: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
 
 
 @app.get("/chat/sessions")
